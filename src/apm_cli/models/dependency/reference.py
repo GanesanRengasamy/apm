@@ -11,6 +11,7 @@ from ...utils.github_host import (
     is_artifactory_path,
     is_azure_devops_hostname,
     is_github_hostname,
+    is_gitea_hostname,
     is_supported_git_host,
     parse_artifactory_path,
     unsupported_host_error,
@@ -73,6 +74,12 @@ class DependencyReference:
         from ...utils.github_host import is_azure_devops_hostname
 
         return self.host is not None and is_azure_devops_hostname(self.host)
+
+    def is_gitea(self) -> bool:
+        """Check if this reference points to Gitea."""
+        from ...utils.github_host import is_gitea_hostname
+
+        return self.host is not None and is_gitea_hostname(self.host)
 
     @property
     def virtual_type(self) -> "Optional[VirtualPackageType]":

@@ -34,12 +34,17 @@ from ..utils.github_host import (
     build_ado_https_clone_url,
     build_ado_ssh_url,
     build_ado_api_url,
+    build_gitea_https_clone_url,
+    build_gitea_ssh_url,
+    build_gitea_api_url,
+    build_gitea_archive_url,
     build_raw_content_url,
     build_artifactory_archive_url,
     sanitize_token_url_in_message,
     default_host,
     is_azure_devops_hostname,
-    is_github_hostname
+    is_github_hostname,
+    is_gitea_hostname
 )
 
 
@@ -203,7 +208,11 @@ class GitHubPackageDownloader:
         self.artifactory_token = self.token_manager.get_token_for_purpose('artifactory_modules', env)
         self.has_artifactory_token = self.artifactory_token is not None
 
-        _debug(f"Token setup: has_github_token={self.has_github_token}, has_ado_token={self.has_ado_token}, has_artifactory_token={self.has_artifactory_token}"
+        # Gitea (env-only at init; lazy auth resolution happens per dep)
+        self.gitea_token = self.token_manager.get_token_for_purpose('gitea_modules', env)
+        self.has_gitea_token = self.gitea_token is not None
+
+        _debug(f"Token setup: has_github_token={self.has_github_token}, has_ado_token={self.has_ado_token}, has_artifactory_token={self.has_artifactory_token}, has_gitea_token={self.has_gitea_token}"
                f"{', source=credential_helper' if self._github_token_from_credential_fill else ''}")
         
         return env
@@ -383,7 +392,7 @@ class GitHubPackageDownloader:
     def _resolve_dep_token(self, dep_ref: Optional[DependencyReference] = None) -> Optional[str]:
         """Resolve the per-dependency auth token via AuthResolver.
 
-        GitHub and ADO hosts use the token resolved by AuthResolver.
+        GitHub, ADO, and Gitea hosts use the token resolved by AuthResolver.
         Generic hosts (GitLab, Bitbucket, etc.) return None so git
         credential helpers can provide credentials instead.
 
@@ -397,12 +406,13 @@ class GitHubPackageDownloader:
             return self.github_token
 
         is_ado = dep_ref.is_azure_devops()
+        is_gitea = dep_ref.is_gitea()
         dep_host = dep_ref.host
         if dep_host:
             is_github = is_github_hostname(dep_host)
         else:
             is_github = True
-        is_generic = not is_ado and not is_github
+        is_generic = not is_ado and not is_github and not is_gitea
 
         if is_generic:
             return None
@@ -524,9 +534,10 @@ class GitHubPackageDownloader:
     def _build_repo_url(self, repo_ref: str, use_ssh: bool = False, dep_ref: DependencyReference = None, token: Optional[str] = None) -> str:
         """Build the appropriate repository URL for cloning.
         
-        Supports both GitHub and Azure DevOps URL formats:
+        Supports both GitHub, Azure DevOps, and Gitea URL formats:
         - GitHub: https://github.com/owner/repo.git
         - ADO: https://dev.azure.com/org/project/_git/repo
+        - Gitea: https://gitea.com/owner/repo.git
         
         Args:
             repo_ref: Repository reference in format "owner/repo" or "org/project/repo" for ADO
@@ -537,7 +548,7 @@ class GitHubPackageDownloader:
         Returns:
             str: Repository URL suitable for git clone operations
         """
-        # Use dep_ref.host if available (for ADO), otherwise fall back to instance or default
+        # Use dep_ref.host if available (for ADO/Gitea), otherwise fall back to instance or default
         if dep_ref and dep_ref.host:
             host = dep_ref.host
         else:
@@ -546,11 +557,15 @@ class GitHubPackageDownloader:
         # Check if this is Azure DevOps (either via dep_ref or host detection)
         is_ado = (dep_ref and dep_ref.is_azure_devops()) or is_azure_devops_hostname(host)
         
+        # Check if this is Gitea (either via dep_ref or host detection)
+        is_gitea = (dep_ref and dep_ref.is_gitea()) or is_gitea_hostname(host)
+        
         # Use provided token or fall back to instance default
         github_token = token if token is not None else self.github_token
         ado_token = token if (token is not None and is_ado) else self.ado_token
+        gitea_token = token if (token is not None and is_gitea) else self.gitea_token
         
-        _debug(f"_build_repo_url: host={host}, is_ado={is_ado}, dep_ref={'present' if dep_ref else 'None'}, "
+        _debug(f"_build_repo_url: host={host}, is_ado={is_ado}, is_gitea={is_gitea}, dep_ref={'present' if dep_ref else 'None'}, "
                f"ado_org={dep_ref.ado_organization if dep_ref else None}")
         
         if is_ado and dep_ref and dep_ref.ado_organization:
@@ -572,6 +587,14 @@ class GitHubPackageDownloader:
                     dep_ref.ado_repo,
                     host=host
                 )
+        elif is_gitea:
+            # Use Gitea URL builders
+            if use_ssh:
+                return build_gitea_ssh_url(repo_ref, host=host)
+            elif gitea_token:
+                return build_gitea_https_clone_url(repo_ref, token=gitea_token, host=host)
+            else:
+                return build_gitea_https_clone_url(repo_ref, host=host)
         else:
             # Determine if this host should receive a GitHub token
             is_github = is_github_hostname(host)
@@ -590,6 +613,7 @@ class GitHubPackageDownloader:
         Uses authentication patterns appropriate for the platform:
         - GitHub: x-access-token format for private repos, SSH, or HTTPS
         - Azure DevOps: PAT-based authentication
+        - Gitea: Token-based authentication or SSH
         
         Args:
             repo_url_base: Base repository reference (owner/repo)
@@ -607,6 +631,7 @@ class GitHubPackageDownloader:
         """
         last_error = None
         is_ado = dep_ref and dep_ref.is_azure_devops()
+        is_gitea = dep_ref and dep_ref.is_gitea()
         
         # Determine host type for auth decisions
         dep_host = dep_ref.host if dep_ref else None
@@ -615,13 +640,13 @@ class GitHubPackageDownloader:
         else:
             # When no host is specified, default to GitHub behavior
             is_github = True
-        is_generic = not is_ado and not is_github
+        is_generic = not is_ado and not is_github and not is_gitea
         
         # Resolve per-dependency token via AuthResolver.
         dep_token = self._resolve_dep_token(dep_ref)
         has_token = dep_token
         
-        _debug(f"_clone_with_fallback: repo={repo_url_base}, is_ado={is_ado}, is_generic={is_generic}, has_token={has_token is not None}")
+        _debug(f"_clone_with_fallback: repo={repo_url_base}, is_ado={is_ado}, is_gitea={is_gitea}, is_generic={is_generic}, has_token={has_token is not None}")
         
         # When APM has a token for this host, use the locked-down env (APM manages auth).
         # When no token is available, relax the env so git credential helpers (gh auth,

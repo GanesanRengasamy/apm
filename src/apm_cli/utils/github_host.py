@@ -1,4 +1,4 @@
-"""Utilities for handling GitHub, GitHub Enterprise, Azure DevOps, and Artifactory hostnames and URLs."""
+"""Utilities for handling GitHub, GitHub Enterprise, Azure DevOps, Gitea, and Artifactory hostnames and URLs."""
 
 import os
 import re
@@ -47,6 +47,27 @@ def is_github_hostname(hostname: Optional[str]) -> bool:
     return False
 
 
+def is_gitea_hostname(hostname: Optional[str]) -> bool:
+    """Return True if hostname should be treated as Gitea.
+
+    Accepts 'gitea.com', '*.gitea.io', and any subdomain of gitea.com (e.g., 'www.gitea.com').
+    
+    Note: This is primarily for internal hostname classification.
+    APM accepts any Git host via FQDN syntax without validation.
+    """
+    if not hostname:
+        return False
+    h = hostname.lower()
+    if h == "gitea.com":
+        return True
+    if h.endswith(".gitea.io"):
+        return True
+    # Accept subdomains of gitea.com (e.g., www.gitea.com, git.gitea.com)
+    if h.endswith(".gitea.com") and h != "gitea.com":
+        return True
+    return False
+
+
 def is_supported_git_host(hostname: Optional[str]) -> bool:
     """Return True if hostname is a supported Git hosting platform.
     
@@ -55,8 +76,9 @@ def is_supported_git_host(hostname: Optional[str]) -> bool:
     - GitHub Enterprise (*.ghe.com)
     - Azure DevOps Services (dev.azure.com)
     - Azure DevOps legacy (*.visualstudio.com)
+    - Gitea.com and *.gitea.io (Gitea Cloud)
     - Any FQDN set via GITHUB_HOST environment variable
-    - Any valid FQDN (generic git host support for GitLab, Bitbucket, etc.)
+    - Any valid FQDN (generic git host support for GitLab, Bitbucket, self-hosted Gitea, etc.)
     """
     if not hostname:
         return False
@@ -67,6 +89,10 @@ def is_supported_git_host(hostname: Optional[str]) -> bool:
     
     # Check Azure DevOps hosts
     if is_azure_devops_hostname(hostname):
+        return True
+    
+    # Check Gitea hosts
+    if is_gitea_hostname(hostname):
         return True
     
     # Accept the configured default host (supports custom Azure DevOps Server, etc.)
@@ -103,6 +129,7 @@ def unsupported_host_error(hostname: str, context: Optional[str] = None) -> str:
     msg += "  * github.com\n"
     msg += "  * *.ghe.com (GitHub Enterprise Cloud)\n"
     msg += "  * dev.azure.com, *.visualstudio.com (Azure DevOps)\n"
+    msg += "  * gitea.com, *.gitea.io (Gitea Cloud)\n"
     msg += "  * gitlab.com, bitbucket.org, or any self-hosted Git server\n"
     msg += "\n"
     
@@ -242,6 +269,96 @@ def build_ado_api_url(org: str, project: str, repo: str, path: str, ref: str = "
     )
 
 
+# Gitea URL builders
+
+def build_gitea_https_clone_url(owner: str, repo: str, token: Optional[str] = None, host: str = "gitea.com") -> str:
+    """Build Gitea HTTPS clone URL.
+    
+    Gitea uses standard Git clone URLs similar to GitHub but without the .git suffix by default.
+    However, for consistency with other platforms, we add the .git suffix.
+    
+    Format: https://{host}/{owner}/{repo}.git
+    
+    Args:
+        owner: Repository owner (user or organization)
+        repo: Repository name
+        token: Optional Personal Access Token for authentication
+        host: Gitea host (default: gitea.com)
+    
+    Returns:
+        str: HTTPS clone URL for Gitea
+    """
+    if token:
+        # Gitea supports token authentication via HTTP Basic Auth
+        return f"https://{token}@{host}/{owner}/{repo}.git"
+    return f"https://{host}/{owner}/{repo}.git"
+
+
+def build_gitea_ssh_url(owner: str, repo: str, host: str = "gitea.com") -> str:
+    """Build Gitea SSH clone URL.
+    
+    Format: git@{host}:{owner}/{repo}.git
+    
+    Args:
+        owner: Repository owner (user or organization)
+        repo: Repository name
+        host: Gitea SSH host (default: gitea.com)
+    
+    Returns:
+        str: SSH clone URL for Gitea
+    """
+    return f"git@{host}:{owner}/{repo}.git"
+
+
+def build_gitea_api_url(owner: str, repo: str, path: str, ref: str = "main", host: str = "gitea.com") -> str:
+    """Build Gitea API URL for retrieving repository contents.
+    
+    API format: https://{host}/api/v1/repos/{owner}/{repo}/raw/{ref}/{path}
+    
+    Gitea's raw content API provides direct file access without the complexity
+    of the full contents API.
+    
+    Args:
+        owner: Repository owner (user or organization)
+        repo: Repository name
+        path: Path to file within the repository
+        ref: Git reference (branch, tag, or commit). Defaults to "main"
+        host: Gitea host (default: gitea.com)
+    
+    Returns:
+        str: API URL for retrieving file contents
+    """
+    encoded_path = url_quote(path, safe='')
+    encoded_ref = url_quote(ref, safe='')
+    return f"https://{host}/api/v1/repos/{owner}/{repo}/raw/{encoded_ref}/{encoded_path}"
+
+
+def build_gitea_archive_url(owner: str, repo: str, ref: str = "main", host: str = "gitea.com", scheme: str = "https") -> tuple:
+    """Build Gitea archive download URLs.
+    
+    Gitea archives can be downloaded from the repository's archive endpoint.
+    Returns a tuple of URLs to try in order.
+    
+    Args:
+        owner: Repository owner (user or organization)
+        repo: Repository name
+        ref: Git reference (branch or tag name)
+        host: Gitea host (default: gitea.com)
+        scheme: URL scheme (default 'https'; 'http' for local dev proxies)
+    
+    Returns:
+        Tuple of URLs to try in order
+    """
+    base = f"{scheme}://{host}/{owner}/{repo}"
+    encoded_ref = url_quote(ref, safe='')
+    return (
+        # Main archive URL format
+        f"{base}/archive/{encoded_ref}.zip",
+        # Alternative archive format (Gitea also supports tar.gz)
+        f"{base}/archive/refs/heads/{encoded_ref}.zip",
+    )
+
+
 def is_artifactory_path(path_segments: list) -> bool:
     """Return True if path segments indicate a JFrog Artifactory VCS repository.
 
@@ -345,3 +462,93 @@ def sanitize_token_url_in_message(message: str, host: Optional[str] = None) -> s
     host_re = re.escape(host)
     pattern = rf"https://[^@\s]+@{host_re}"
     return re.sub(pattern, f"https://***@{host}", message)
+
+
+# Gitea URL builders
+
+def build_gitea_https_clone_url(repo_ref: str, token: Optional[str] = None, host: str = "gitea.com") -> str:
+    """Build Gitea HTTPS clone URL.
+    
+    Gitea supports token authentication via the Authorization header or in URL.
+    The standard format is: https://gitea.com/owner/repo.git
+    
+    Args:
+        repo_ref: Repository reference in format "owner/repo"
+        token: Optional access token for authentication
+        host: Gitea host (default: gitea.com)
+    
+    Returns:
+        str: HTTPS clone URL for Gitea
+    """
+    if token:
+        # Gitea accepts access token in URL with empty username
+        return f"https://{token}@{host}/{repo_ref}.git"
+    return f"https://{host}/{repo_ref}.git"
+
+
+def build_gitea_ssh_url(repo_ref: str, host: str = "gitea.com") -> str:
+    """Build Gitea SSH clone URL.
+    
+    For Gitea Cloud:
+        git@gitea.com:owner/repo.git
+    
+    For self-hosted Gitea:
+        git@host:owner/repo.git
+    
+    Args:
+        repo_ref: Repository reference in format "owner/repo"
+        host: SSH host (default: gitea.com for cloud; set to your server for on-prem)
+    
+    Returns:
+        str: SSH clone URL for Gitea
+    """
+    return f"git@{host}:{repo_ref}.git"
+
+
+def build_gitea_api_url(owner: str, repo: str, path: str, ref: str = "main", host: str = "gitea.com") -> str:
+    """Build Gitea API URL for file contents.
+    
+    API format: https://gitea.com/api/v1/repos/{owner}/{repo}/contents/{path}
+    
+    Args:
+        owner: Repository owner (user or organisation)
+        repo: Repository name
+        path: Path to file within the repository
+        ref: Git reference (branch, tag, or commit). Defaults to "main"
+        host: Gitea host (default: gitea.com)
+    
+    Returns:
+        str: API URL for retrieving file contents
+    """
+    encoded_path = url_quote(path, safe='')
+    encoded_ref = url_quote(ref, safe='')
+    return (
+        f"https://{host}/api/v1/repos/{owner}/{repo}/contents/{encoded_path}"
+        f"?ref={encoded_ref}"
+    )
+
+
+def build_gitea_archive_url(owner: str, repo: str, ref: str = "main", host: str = "gitea.com", scheme: str = "https") -> tuple:
+    """Build Gitea archive download URLs.
+
+    Returns a tuple of URLs to try in order for different archive patterns.
+    Gitea provides archive downloads via the repo archive endpoint.
+
+    Args:
+        owner: Repository owner
+        repo: Repository name
+        ref: Git reference (branch or tag name)
+        host: Gitea hostname (default: gitea.com)
+        scheme: URL scheme (default 'https'; 'http' for local dev proxies)
+
+    Returns:
+        Tuple of URLs to try in order
+    """
+    base = f"{scheme}://{host}/{owner}/{repo}"
+    encoded_ref = url_quote(ref, safe='')
+    return (
+        # Standard archive URL format
+        f"{base}/archive/{encoded_ref}.zip",
+        # Alternative format some Gitea instances use
+        f"{base}/archive/refs/heads/{encoded_ref}.zip",
+    )
