@@ -198,6 +198,103 @@ def test_build_ado_ssh_url_server():
 
 def test_build_ado_api_url():
     """Test Azure DevOps API URL construction."""
+    url = github_host.build_ado_api_url("myorg", "myproject", "myrepo", "path/to/file.md")
+    assert url.startswith("https://dev.azure.com/myorg/myproject/_apis/git/repositories/myrepo/items")
+    assert "path=path%2Fto%2Ffile.md" in url
+    assert "versionDescriptor.version=main" in url  # default ref is "main"
+
+
+# Gitea hostname detection tests
+
+def test_is_gitea_hostname():
+    """Test Gitea hostname detection."""
+    # Valid Gitea hosts
+    assert github_host.is_gitea_hostname("gitea.com")
+    assert github_host.is_gitea_hostname("www.gitea.com")
+    assert github_host.is_gitea_hostname("git.gitea.io")
+    assert github_host.is_gitea_hostname("myteam.gitea.io")
+    
+    # Invalid hosts
+    assert not github_host.is_gitea_hostname("github.com")
+    assert not github_host.is_gitea_hostname("gitlab.com")
+    assert not github_host.is_gitea_hostname("example.com")
+    assert not github_host.is_gitea_hostname("gitea.com/user/repo")  # has path
+    assert not github_host.is_gitea_hostname(None)
+    assert not github_host.is_gitea_hostname("")
+
+
+def test_is_supported_git_host_gitea():
+    """Test that Gitea hosts are supported."""
+    assert github_host.is_supported_git_host("gitea.com")
+    assert github_host.is_supported_git_host("www.gitea.com")
+    assert github_host.is_supported_git_host("myteam.gitea.io")
+
+
+# Gitea URL builder tests
+
+def test_build_gitea_https_clone_url():
+    """Test Gitea HTTPS URL construction."""
+    # Without token
+    url = github_host.build_gitea_https_clone_url("owner/repo")
+    assert url == "https://gitea.com/owner/repo.git"
+    
+    # With token
+    url = github_host.build_gitea_https_clone_url("owner/repo", token="mytoken")
+    assert url == "https://mytoken@gitea.com/owner/repo.git"
+    
+    # With custom host (self-hosted Gitea)
+    url = github_host.build_gitea_https_clone_url("owner/repo", host="gitea.company.internal")
+    assert url == "https://gitea.company.internal/owner/repo.git"
+    
+    # With token and custom host
+    url = github_host.build_gitea_https_clone_url("owner/repo", token="mytoken", host="git.company.com")
+    assert url == "https://mytoken@git.company.com/owner/repo.git"
+
+
+def test_build_gitea_ssh_url():
+    """Test Gitea SSH URL construction."""
+    url = github_host.build_gitea_ssh_url("owner/repo")
+    assert url == "git@gitea.com:owner/repo.git"
+    
+    # With custom host (self-hosted Gitea)
+    url = github_host.build_gitea_ssh_url("owner/repo", host="gitea.company.internal")
+    assert url == "git@gitea.company.internal:owner/repo.git"
+
+
+def test_build_gitea_api_url():
+    """Test Gitea API URL construction."""
+    url = github_host.build_gitea_api_url("owner", "repo", "path/to/file.md")
+    assert url.startswith("https://gitea.com/api/v1/repos/owner/repo/contents/")
+    assert "path%2Fto%2Ffile.md" in url  # path is URL-encoded
+    assert "ref=main" in url
+    
+    # With custom ref
+    url = github_host.build_gitea_api_url("owner", "repo", "README.md", ref="v1.0.0")
+    assert "ref=v1.0.0" in url
+    
+    # With custom host
+    url = github_host.build_gitea_api_url("owner", "repo", "README.md", host="gitea.company.com")
+    assert url.startswith("https://gitea.company.com/api/v1/")
+
+
+def test_build_gitea_archive_url():
+    """Test Gitea archive URL construction."""
+    urls = github_host.build_gitea_archive_url("owner", "repo", ref="main")
+    assert len(urls) == 2
+    assert "https://gitea.com/owner/repo/archive/main.zip" in urls
+    assert "https://gitea.com/owner/repo/archive/refs/heads/main.zip" in urls
+    
+    # With custom host
+    urls = github_host.build_gitea_archive_url("owner", "repo", ref="v1.0", host="gitea.company.com")
+    assert all("gitea.company.com" in url for url in urls)
+
+
+def test_gitea_url_encodes_special_characters():
+    """Test that Gitea URL builders properly encode special characters in paths."""
+    # Path with spaces and special chars should be URL-encoded
+    url = github_host.build_gitea_api_url("owner", "repo", "path/with spaces/file.md", ref="feature/branch")
+    assert "path%2Fwith%20spaces%2Ffile.md" in url
+    assert "feature%2Fbranch" in url
     url = github_host.build_ado_api_url("dmeppiel-org", "market-js-app", "compliance-rules", "apm.yml", "main")
     assert "/_apis/git/repositories/compliance-rules/items" in url
     assert "path=apm.yml" in url
